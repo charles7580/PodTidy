@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.claude/
+.vscode/
+.idea/
+
+# Config (contains user-specific paths)
+.app_config.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test audio files (keep directory structure)
+电台节目/
+播客目录/*.mp3
+播客目录/**/*.mp3

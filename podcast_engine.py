@@ -209,6 +209,30 @@ def extract_speaker_prefix(filename_stem: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Track Number Helpers
+# ---------------------------------------------------------------------------
+
+def _read_existing_track(filepath: str) -> int | None:
+    """
+    Read the existing tracknumber tag from *filepath* as a fallback.
+    Returns the integer track number, or None if not found.
+    """
+    try:
+        from mutagen import File
+        audio = File(filepath, easy=True)
+        if audio is None:
+            return None
+        tn = audio.get("tracknumber")
+        if tn and tn[0]:
+            num_str = str(tn[0]).split("/")[0].strip()
+            if num_str.isdigit():
+                return int(num_str)
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Track Number Assignment (TYPE_B)
 # ---------------------------------------------------------------------------
 
@@ -314,33 +338,30 @@ def _format_mp3_tags(
     filepath: str, podcast_name: str, title: str,
     track_num: int | None, podcast_dir: str,
 ) -> None:
-    """Format ID3v2 tags on an MP3 file."""
+    """Format ID3v2 tags on an MP3 file — single-pass clear + rewrite."""
     from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TRCK
 
-    # ---- Delete all existing tags ----
+    # ---- Open file, clear all frames, add new ones, save once ----
     try:
         audio = ID3(filepath)
-        audio.delete()
-        audio.save()
     except Exception:
-        pass  # File may not have any ID3 tags yet
+        audio = ID3()
 
-    # ---- Write fresh tags ----
-    audio = ID3()
+    audio.delete()  # wipe all existing frames (including old APIC)
+
     audio.add(TIT2(encoding=3, text=title))
     audio.add(TPE1(encoding=3, text=podcast_name))
     audio.add(TALB(encoding=3, text=podcast_name))
     if track_num is not None:
         audio.add(TRCK(encoding=3, text=str(track_num)))
 
-    # ---- Album art ----
-    art_data = _load_album_art(podcast_dir)
+    # ---- Album art — embed original file bytes without conversion ----
+    art_data, art_mime = _load_album_art_raw(podcast_dir)
     if art_data is not None:
-        mime_type = _get_art_mime(podcast_dir)
         audio.add(
             APIC(
                 encoding=3,
-                mime=mime_type,
+                mime=art_mime,
                 type=3,  # Cover (front)
                 desc="Cover",
                 data=art_data,
@@ -402,46 +423,28 @@ def _format_mp4_art(filepath: str, podcast_dir: str) -> None:
 # Album Art Helpers
 # ---------------------------------------------------------------------------
 
-def _load_album_art(podcast_dir: str) -> bytes | None:
+def _load_album_art_raw(podcast_dir: str) -> tuple[bytes | None, str | None]:
     """
-    Load album art from folder.jpg or folder.png in *podcast_dir*.
-    PNG files are converted to JPEG in memory.
-    Returns raw JPEG bytes, or None if no art file found.
+    Load album art from folder.jpg / folder.png in *podcast_dir*.
+    Returns (raw_bytes, mime_type) — NO format conversion.
+    Returns (None, None) if no art file found.
     """
-    for fname in ("folder.jpg", "folder.jpeg", "folder.png"):
+    for fname, mime in (
+        ("folder.jpg", "image/jpeg"),
+        ("folder.jpeg", "image/jpeg"),
+        ("folder.png", "image/png"),
+    ):
         art_path = os.path.join(podcast_dir, fname)
-        if not os.path.isfile(art_path):
-            continue
-
-        ext = os.path.splitext(fname)[1].lower()
-        if ext in (".jpg", ".jpeg"):
+        if os.path.isfile(art_path):
             with open(art_path, "rb") as f:
-                return f.read()
-        elif ext == ".png":
-            # Convert PNG → JPEG
-            try:
-                from PIL import Image
-                import io
-                img = Image.open(art_path).convert("RGB")
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=90)
-                return buf.getvalue()
-            except Exception:
-                # Fallback: return raw PNG (some players support it)
-                with open(art_path, "rb") as f:
-                    return f.read()
-
-    return None
+                return f.read(), mime
+    return None, None
 
 
-def _get_art_mime(podcast_dir: str) -> str:
-    """Return the MIME type of the album art file."""
-    for fname in ("folder.jpg", "folder.jpeg"):
-        if os.path.isfile(os.path.join(podcast_dir, fname)):
-            return "image/jpeg"
-    if os.path.isfile(os.path.join(podcast_dir, "folder.png")):
-        return "image/png"
-    return "image/jpeg"
+def _load_album_art(podcast_dir: str) -> bytes | None:
+    """Legacy wrapper — returns raw bytes (any format)."""
+    data, _ = _load_album_art_raw(podcast_dir)
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -682,8 +685,17 @@ class PodcastEngine:
                     )
 
                     if err_msg is not None:
-                        errors.append(f"「{basename}」: {err_msg}")
-                        continue
+                        # TYPE_A fallback: try reading existing
+                        # tracknumber tag before giving up
+                        existing_track = _read_existing_track(filepath)
+                        if existing_track is not None:
+                            track_num = existing_track
+                            self._log(
+                                f"  → 从原标签读取音轨号: {track_num}"
+                            )
+                        else:
+                            errors.append(f"「{basename}」: {err_msg}")
+                            continue
 
                     # -- 3d. Assign track number for TYPE_B --
                     if podcast in TYPE_B_PODCASTS:
@@ -717,8 +729,8 @@ class PodcastEngine:
                     # Avoid overwriting; append (2), (3) if needed
                     dest_path = _unique_path(dest_path)
 
-                    shutil.move(filepath, dest_path)
-                    self._log(f"  → 已移动至: {os.path.basename(dest_path)}")
+                    shutil.copy2(filepath, dest_path)
+                    self._log(f"  → 已复制至: {os.path.basename(dest_path)}")
 
                     results.append({
                         "original": basename,

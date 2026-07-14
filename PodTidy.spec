@@ -2,7 +2,9 @@
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 # Collect third-party package data
-datas = []
+datas = [
+    ('app_icon.ico', '.'),   # window title-bar icon
+]
 binaries = []
 hiddenimports = [
     'tkinterdnd2',
@@ -64,6 +66,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='app_icon.ico',
 )
 
 coll = COLLECT(

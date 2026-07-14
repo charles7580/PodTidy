@@ -33,16 +33,37 @@ PODCAST_NAMES = [
     "三个火呛手",
     "谐星聊天会",
     "正经叭叭",
+    "科技参考5",
 ]
 
 # Podcasts that extract track number from the filename
-TYPE_A_PODCASTS = {"得体广播站", "三个火呛手", "正经叭叭"}
+TYPE_A_PODCASTS = {"得体广播站", "三个火呛手", "正经叭叭", "科技参考5"}
 
 # Podcasts that get track number from directory (max + 1)
 TYPE_B_PODCASTS = {"罗永浩的十字路口", "谐星聊天会"}
 
 # Podcast with special title handling (preserve number prefix)
 XIE_XING = "谐星聊天会"
+
+# Podcast with "zk-0625丨" prefix stripping + "丨" removal
+KEJI_CANKAO = "科技参考5"
+
+# Podcasts whose ID3 artist tag differs from the podcast name
+# (default: artist = podcast_name)
+PODCAST_ARTIST_MAP = {
+    "科技参考5": "卓克",
+}
+
+
+def get_artist_name(podcast_name: str) -> str:
+    """Return the artist tag value for a podcast (defaults to podcast name)."""
+    return PODCAST_ARTIST_MAP.get(podcast_name, podcast_name)
+
+# Regex for stripping the "zk-MMDD丨" date-code prefix from 科技参考5 filenames
+_RE_KEJI_PREFIX = re.compile(
+    r"^zk-\d+\s*[丨｜]\s*",
+    re.IGNORECASE,
+)
 
 # Filename-pattern → podcast mapping (used when ID3 tags are missing/garbled)
 FILENAME_TO_PODCAST = [
@@ -51,6 +72,9 @@ FILENAME_TO_PODCAST = [
     ("罗永浩的十字路口", "罗永浩的十字路口"),
     ("谐星聊天会", "谐星聊天会"),
     ("正经叭叭", "正经叭叭"),
+    ("科技参考", "科技参考5"),
+    ("zk-", "科技参考5"),
+    ("ZK-", "科技参考5"),
 ]
 
 # Regex for episode-number prefix in filenames
@@ -128,14 +152,48 @@ def detect_podcast(filepath: str) -> str | None:
 # Title & Track Extraction
 # ---------------------------------------------------------------------------
 
+def _read_tags(filepath: str) -> tuple[str | None, int | None]:
+    """
+    Read ``(title, track_number)`` from the ID3 tags of *filepath*.
+    Returns ``(None, None)`` when tags are missing or unreadable.
+    """
+    try:
+        from mutagen import File
+        audio = File(filepath, easy=True)
+        if audio is None:
+            return None, None
+
+        title: str | None = None
+        t = audio.get("title")
+        if t and t[0] and t[0].strip():
+            title = t[0].strip()
+
+        track_num: int | None = None
+        tn = audio.get("tracknumber")
+        if tn and tn[0]:
+            num_str = str(tn[0]).split("/")[0].strip()
+            if num_str.isdigit():
+                track_num = int(num_str)
+
+        return title, track_num
+    except Exception:
+        return None, None
+
+
 def extract_title_and_track(
-    filename_stem: str, podcast_name: str
+    filename_stem: str, podcast_name: str, filepath: str | None = None
 ) -> tuple[str, int | None, str | None]:
     """
-    Parse title and track number from a filename stem.
+    Parse title and track number from ID3 tags first, then fall back
+    to filename parsing.
 
     ``filename_stem`` is the filename without the speaker prefix and
     without the extension — i.e. everything after ``" - "``.
+
+    When *filepath* is provided, ID3 tags are read first; if both
+    ``title`` and ``tracknumber`` are present in the tags, they are
+    used directly.  Otherwise the function falls through to the
+    existing filename-based logic, merging any partial tag data.
 
     Returns ``(title, track_number, error_message)``.
     ``track_number`` is ``None`` for TYPE_B podcasts (assigned later).
@@ -145,6 +203,23 @@ def extract_title_and_track(
     stem = filename_stem.strip()
 
     # ------------------------------------------------------------------
+    # Stage 0 — try ID3 tags first (for re-processing already-tagged files)
+    # ------------------------------------------------------------------
+    tag_title, tag_track = None, None
+    if filepath:
+        tag_title, tag_track = _read_tags(filepath)
+        if tag_title and tag_track is not None:
+            # Tags provide everything we need — skip filename parsing
+            return (tag_title, tag_track, None)
+
+    # ------------------------------------------------------------------
+    # Stage 1 — filename-based extraction (compute; don't return yet)
+    # ------------------------------------------------------------------
+    fn_title: str = stem
+    fn_track: int | None = None
+    fn_err: str | None = None
+
+    # ------------------------------------------------------------------
     # 谐星聊天会 — preserve number in "数字. " format, track via dir
     # ------------------------------------------------------------------
     if podcast_name == XIE_XING:
@@ -152,44 +227,73 @@ def extract_title_and_track(
         if m:
             num = m.group(1)
             rest = m.group(2).strip()
-            title = f"{num}. {rest}"
+            fn_title = f"{num}. {rest}"
         else:
-            # No vol. prefix — keep original
-            title = stem
-        return (title, None, None)  # track assigned later (TYPE_B)
+            fn_title = stem
+        # track stays None (assigned later for TYPE_B); no error
+
+    # ------------------------------------------------------------------
+    # 科技参考5 — strip "zk-MMDD丨" prefix + "丨" separators
+    # ------------------------------------------------------------------
+    elif podcast_name == KEJI_CANKAO:
+        cleaned = _RE_KEJI_PREFIX.sub("", stem)
+        cleaned = cleaned.replace("丨", "").replace("｜", "")
+        cleaned = cleaned.strip()
+        m = re.match(r"^0*(\d+)\s*(.*)", cleaned)
+        if m:
+            fn_track = int(m.group(1))
+            fn_title = m.group(2).strip()
+        else:
+            fn_err = (
+                f"无法从文件名中提取音轨号: 「{filename_stem}」\n"
+                f"播客「{podcast_name}」需要文件名包含音轨号（如 zk-0625丨064丨标题）"
+            )
 
     # ------------------------------------------------------------------
     # Other TYPE_A podcasts: 得体, 三个火呛手, 正经叭叭
     # ------------------------------------------------------------------
-    if podcast_name in TYPE_A_PODCASTS:
+    elif podcast_name in TYPE_A_PODCASTS:
         m = _RE_EPISODE_PREFIX.match(stem)
         if m:
-            track_num = int(m.group(1))
-            title = m.group(2).strip()
-            return (title, track_num, None)
+            fn_track = int(m.group(1))
+            fn_title = m.group(2).strip()
         else:
-            # No episode number found → error
-            return (
-                stem,
-                None,
+            fn_err = (
                 f"无法从文件名中提取音轨号: 「{filename_stem}」\n"
-                f"播客「{podcast_name}」需要文件名包含序号（如 Vol.147、Ep40）",
+                f"播客「{podcast_name}」需要文件名包含序号（如 Vol.147、Ep40）"
             )
 
     # ------------------------------------------------------------------
     # TYPE_B: 罗永浩的十字路口
     # ------------------------------------------------------------------
-    if podcast_name in TYPE_B_PODCASTS:
+    elif podcast_name in TYPE_B_PODCASTS:
         m = _RE_EPISODE_PREFIX.match(stem)
         if m:
-            # Strip the episode prefix from the title
-            title = m.group(2).strip()
+            fn_title = m.group(2).strip()
         else:
-            title = stem
-        return (title, None, None)  # track assigned later (TYPE_B)
+            fn_title = stem
+        # track stays None (assigned later for TYPE_B); no error
 
-    # Fallback (shouldn't reach here)
-    return (stem, None, None)
+    # ------------------------------------------------------------------
+    # Stage 2 — merge: tag values preferred, filename values fill gaps
+    # ------------------------------------------------------------------
+    title = tag_title if tag_title else fn_title
+    track_num = tag_track if tag_track is not None else fn_track
+
+    # ------------------------------------------------------------------
+    # Stage 3 — validate TYPE_A track number
+    # ------------------------------------------------------------------
+    if podcast_name in TYPE_A_PODCASTS and track_num is None:
+        # Try reading existing tracknumber tag as last resort
+        if filepath:
+            existing = _read_existing_track(filepath)
+            if existing is not None:
+                track_num = existing
+                fn_err = None  # recovered — clear the filename error
+        if track_num is None and fn_err is not None:
+            return (title, None, fn_err)
+
+    return (title, track_num, None)
 
 
 def extract_speaker_prefix(filename_stem: str) -> str:
@@ -350,7 +454,7 @@ def _format_mp3_tags(
     audio.delete()  # wipe all existing frames (including old APIC)
 
     audio.add(TIT2(encoding=3, text=title))
-    audio.add(TPE1(encoding=3, text=podcast_name))
+    audio.add(TPE1(encoding=3, text=get_artist_name(podcast_name)))
     audio.add(TALB(encoding=3, text=podcast_name))
     if track_num is not None:
         audio.add(TRCK(encoding=3, text=str(track_num)))
@@ -387,7 +491,7 @@ def _format_generic_tags(
     audio.delete()
 
     # Write new tags
-    audio["artist"] = podcast_name
+    audio["artist"] = get_artist_name(podcast_name)
     audio["album"] = podcast_name
     audio["title"] = title
     if track_num is not None:
@@ -679,26 +783,18 @@ class PodcastEngine:
                     # -- 3b. Extract speaker prefix for title parsing --
                     content_stem = extract_speaker_prefix(stem)
 
-                    # -- 3c. Extract title & track --
+                    # -- 3c. Extract title & track (tags first, filename fallback) --
                     title, track_num, err_msg = extract_title_and_track(
-                        content_stem, podcast
+                        content_stem, podcast, filepath
                     )
 
                     if err_msg is not None:
-                        # TYPE_A fallback: try reading existing
-                        # tracknumber tag before giving up
-                        existing_track = _read_existing_track(filepath)
-                        if existing_track is not None:
-                            track_num = existing_track
-                            self._log(
-                                f"  → 从原标签读取音轨号: {track_num}"
-                            )
-                        else:
-                            errors.append(f"「{basename}」: {err_msg}")
-                            continue
+                        errors.append(f"「{basename}」: {err_msg}")
+                        continue
 
                     # -- 3d. Assign track number for TYPE_B --
-                    if podcast in TYPE_B_PODCASTS:
+                    if podcast in TYPE_B_PODCASTS and track_num is None:
+                        # Only use dir-increment if tags didn't provide a track
                         track_num = track_map.get(filepath)
                         if track_num is None:
                             errors.append(
@@ -722,8 +818,11 @@ class PodcastEngine:
                     else:
                         self._log(f"  → [!] ReplayGain 扫描失败 (文件可能已损坏)")
 
-                    # -- 3g. Build new filename & move --
-                    new_filename = _sanitize_filename(f"{podcast} - {title}{ext}")
+                    # -- 3g. Build new filename & copy --
+                    track_str = f"{track_num:03d}" if track_num is not None else "000"
+                    new_filename = _sanitize_filename(
+                        f"{podcast} - {track_str} - {title}{ext}"
+                    )
                     dest_path = os.path.join(podcast_dir, new_filename)
 
                     # Avoid overwriting; append (2), (3) if needed

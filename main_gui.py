@@ -606,7 +606,8 @@ class PodTidyApp(ctk.CTk if not DND_AVAILABLE else TkinterDnD.Tk):
         self._engine = None
 
         # --- Window setup ---
-        self.title("PodTidy — 播客整理工具")
+        self.title("PodTidy - 播客整理工具 1.1")
+        self._apply_window_icon()
         self._apply_titlebar_theme()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -618,6 +619,26 @@ class PodTidyApp(ctk.CTk if not DND_AVAILABLE else TkinterDnD.Tk):
     # ==================================================================
     # Title-bar theme
     # ==================================================================
+
+    def _apply_window_icon(self):
+        """Set the title-bar / taskbar icon from app_icon.ico."""
+        # Search order: next to exe/script, then in _MEIPASS (PyInstaller)
+        candidates = [
+            os.path.join(CONFIG_DIR, "app_icon.ico"),
+            os.path.join(BASE_DIR, "app_icon.ico"),
+        ]
+        for ico in candidates:
+            if os.path.isfile(ico):
+                try:
+                    # Use tk.call for maximum compatibility on Windows
+                    self.tk.call("wm", "iconbitmap", self._w, "-default", ico)
+                    return
+                except Exception:
+                    try:
+                        self.iconbitmap(default=ico)
+                        return
+                    except Exception:
+                        pass
 
     def _apply_titlebar_theme(self):
         def _set():
@@ -728,6 +749,19 @@ class PodTidyApp(ctk.CTk if not DND_AVAILABLE else TkinterDnD.Tk):
         )
         self._root_label.pack(side="left")
 
+        # Matched podcasts indicator (second line, below the directory selector)
+        self._match_label = ctk.CTkLabel(
+            outer,
+            text="",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            text_color=COLORS["text_dim"],
+        )
+        self._match_label.grid(row=1, column=0, pady=(6, 0))
+
+        # Initial scan if directory is already set (from config)
+        if self._podcast_root:
+            self.after(50, self._refresh_podcast_match)
+
     # ==================================================================
     # Callbacks — directory selection
     # ==================================================================
@@ -746,6 +780,45 @@ class PodTidyApp(ctk.CTk if not DND_AVAILABLE else TkinterDnD.Tk):
             self._config["last_podcast_root"] = directory
             save_config(self._config)
             self._root_label.configure(text=os.path.basename(directory))
+            self._refresh_podcast_match()
+
+    # ==================================================================
+    # Podcast directory matching
+    # ==================================================================
+
+    def _scan_podcast_dirs(self, root_dir: str) -> list[str]:
+        """Return podcast names whose subdirectory exists and contains album art."""
+        matched = []
+        if not root_dir or not os.path.isdir(root_dir):
+            return matched
+        for name in PODCAST_NAMES:
+            subdir = os.path.join(root_dir, name)
+            if not os.path.isdir(subdir):
+                continue
+            for art in ("folder.jpg", "folder.jpeg", "folder.png"):
+                if os.path.isfile(os.path.join(subdir, art)):
+                    matched.append(name)
+                    break
+        return matched
+
+    def _refresh_podcast_match(self):
+        """Scan the current podcast root and update the match indicator label."""
+        if not self._podcast_root or not os.path.isdir(self._podcast_root):
+            self._match_label.configure(text="", text_color=COLORS["text_dim"])
+            return
+
+        matched = self._scan_podcast_dirs(self._podcast_root)
+        if matched:
+            names = "、".join(matched)
+            self._match_label.configure(
+                text=f"已匹配播客: {names}",
+                text_color=COLORS["text_dim"],
+            )
+        else:
+            self._match_label.configure(
+                text="⚠ 未检测到匹配的播客文件夹（需包含 folder.jpg/png）",
+                text_color=COLORS["error"],
+            )
 
     # ==================================================================
     # Callbacks — drag & drop

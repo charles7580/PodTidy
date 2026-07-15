@@ -555,6 +555,28 @@ def _load_album_art(podcast_dir: str) -> bytes | None:
 # ReplayGain via ffmpeg
 # ---------------------------------------------------------------------------
 
+def _has_replaygain(filepath: str) -> bool:
+    """
+    Return ``True`` if *filepath* already has both
+    ``replaygain_track_gain`` and ``replaygain_track_peak`` TXXX tags.
+    """
+    try:
+        from mutagen.id3 import ID3
+        audio = ID3(filepath)
+        has_gain = False
+        has_peak = False
+        for _key, frame in audio.items():
+            if hasattr(frame, "desc"):
+                d = getattr(frame, "desc", "")
+                if d.lower() == "replaygain_track_gain":
+                    has_gain = True
+                elif d.lower() == "replaygain_track_peak":
+                    has_peak = True
+        return has_gain and has_peak
+    except Exception:
+        return False
+
+
 def apply_replaygain(filepath: str) -> bool:
     """
     Scan *filepath* with ffmpeg's ``replaygain`` filter and write
@@ -563,6 +585,9 @@ def apply_replaygain(filepath: str) -> bool:
 
     Returns ``True`` on success, ``False`` on failure (non-fatal).
     """
+    # Skip if the file already has valid ReplayGain tags
+    if _has_replaygain(filepath):
+        return True  # already done — treat as success
     # ---- Step 1: ffmpeg scan ----
     cmd = [
         _FFMPEG_EXE,
@@ -810,13 +835,17 @@ class PodcastEngine:
                     self._log(f"  → 标签已格式化")
 
                     # -- 3f. Apply ReplayGain --
-                    self._report(f"扫描增益 ({processed_count + 1}/{total})...",
-                                 int(processed_count / max(total, 1) * 100))
-                    rg_ok = apply_replaygain(filepath)
-                    if rg_ok:
-                        self._log(f"  → ReplayGain 已写入")
+                    if _has_replaygain(filepath):
+                        rg_ok = True
+                        self._log(f"  → ReplayGain 已跳过 (已有增益信息)")
                     else:
-                        self._log(f"  → [!] ReplayGain 扫描失败 (文件可能已损坏)")
+                        self._report(f"扫描增益 ({processed_count + 1}/{total})...",
+                                     int(processed_count / max(total, 1) * 100))
+                        rg_ok = apply_replaygain(filepath)
+                        if rg_ok:
+                            self._log(f"  → ReplayGain 已写入")
+                        else:
+                            self._log(f"  → [!] ReplayGain 扫描失败 (文件可能已损坏)")
 
                     # -- 3g. Build new filename & copy --
                     track_str = f"{track_num:03d}" if track_num is not None else "000"

@@ -606,7 +606,7 @@ class PodTidyApp(ctk.CTk if not DND_AVAILABLE else TkinterDnD.Tk):
         self._engine = None
 
         # --- Window setup ---
-        self.title("PodTidy - 播客整理工具 1.1")
+        self.title("PodTidy - 播客整理工具 1.2")
         self._apply_window_icon()
         self._apply_titlebar_theme()
         self.protocol("WM_DELETE_WINDOW", self._on_close)

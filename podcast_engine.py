@@ -84,6 +84,12 @@ _RE_EPISODE_PREFIX = re.compile(
     re.DOTALL,
 )
 
+# Fallback for bare track numbers: "259 - vol.259标题", "001 标题", etc.
+_RE_BARE_TRACK = re.compile(
+    r"^(\d{1,4})[\.\s\-\|｜]+(.*)",
+    re.DOTALL,
+)
+
 # Specific regex for 谐星聊天会 to extract "vol.86" → "86. "
 _RE_XIEXING_PREFIX = re.compile(
     r"^(?:vol\.?|Vol\.?|VOL\.?)\s*(\d+)[\.\s]*(.*)",
@@ -152,6 +158,23 @@ def detect_podcast(filepath: str) -> str | None:
 # Title & Track Extraction
 # ---------------------------------------------------------------------------
 
+# Regex to strip leading track-number prefixes from tag titles:
+#   "85. 标题"      → "标题"
+#   "064 标题"      → "标题"
+#   "001 - 标题"    → "标题"
+#   "Vol.147 标题"  → "标题"
+#   "ep 12 标题"    → "标题"
+_RE_TAG_TITLE_TRACK = re.compile(
+    r"^(?:(?:Vol\.?|vol\.?|VOL\.?|Ep\.?|ep\.?|EP\.?|#)\s*\d{1,4}[\.\s\-\|｜]*"
+    r"|\d{1,4}[\.\s\-\|｜]+)",
+)
+
+
+def _strip_title_track_number(title: str) -> str:
+    """Remove a leading track number (e.g. ``85. ``) from *title*."""
+    return _RE_TAG_TITLE_TRACK.sub("", title).strip()
+
+
 def _read_tags(filepath: str) -> tuple[str | None, int | None]:
     """
     Read ``(title, track_number)`` from the ID3 tags of *filepath*.
@@ -208,6 +231,10 @@ def extract_title_and_track(
     tag_title, tag_track = None, None
     if filepath:
         tag_title, tag_track = _read_tags(filepath)
+        # Strip leading track-number prefixes from tag titles
+        # e.g. "85. 标题" → "标题",  "064标题" → "标题"
+        if tag_title:
+            tag_title = _strip_title_track_number(tag_title)
         if tag_title and tag_track is not None:
             # Tags provide everything we need — skip filename parsing
             return (tag_title, tag_track, None)
@@ -254,9 +281,14 @@ def extract_title_and_track(
     # ------------------------------------------------------------------
     elif podcast_name in TYPE_A_PODCASTS:
         m = _RE_EPISODE_PREFIX.match(stem)
+        if not m:
+            m = _RE_BARE_TRACK.match(stem)  # fallback: "259 - vol.259标题"
         if m:
             fn_track = int(m.group(1))
             fn_title = m.group(2).strip()
+            # Strip any residual track-number prefix from the title
+            # (e.g. "vol.259装忙…" → "装忙…")
+            fn_title = _strip_title_track_number(fn_title)
         else:
             fn_err = (
                 f"无法从文件名中提取音轨号: 「{filename_stem}」\n"
@@ -268,8 +300,11 @@ def extract_title_and_track(
     # ------------------------------------------------------------------
     elif podcast_name in TYPE_B_PODCASTS:
         m = _RE_EPISODE_PREFIX.match(stem)
+        if not m:
+            m = _RE_BARE_TRACK.match(stem)  # fallback: bare track number
         if m:
             fn_title = m.group(2).strip()
+            fn_title = _strip_title_track_number(fn_title)
         else:
             fn_title = stem
         # track stays None (assigned later for TYPE_B); no error
@@ -577,17 +612,67 @@ def _has_replaygain(filepath: str) -> bool:
         return False
 
 
+def _read_replaygain_values(filepath: str) -> tuple[str, str] | None:
+    """
+    Read existing ReplayGain ``(gain_text, peak_val)`` from *filepath*.
+    Returns ``None`` when tags are missing or unreadable.
+    """
+    try:
+        from mutagen.id3 import ID3
+        audio = ID3(filepath)
+        gain_text = None
+        peak_val = None
+        for _key, frame in audio.items():
+            if hasattr(frame, "desc"):
+                d = getattr(frame, "desc", "")
+                if d.lower() == "replaygain_track_gain":
+                    if hasattr(frame, "text") and frame.text:
+                        gain_text = str(frame.text[0])
+                elif d.lower() == "replaygain_track_peak":
+                    if hasattr(frame, "text") and frame.text:
+                        peak_val = str(frame.text[0])
+        if gain_text and peak_val:
+            return (gain_text, peak_val)
+        return None
+    except Exception:
+        return None
+
+
+def _write_replaygain_values(filepath: str, gain_text: str, peak_val: str) -> bool:
+    """Write ReplayGain TXXX tags to *filepath*. Returns ``True`` on success."""
+    try:
+        from mutagen.id3 import ID3, TXXX
+
+        audio = ID3(filepath)
+        # Remove any existing ReplayGain tags
+        to_delete = []
+        for key, frame in audio.items():
+            if key.startswith("TXXX"):
+                desc = getattr(frame, "desc", "")
+                if "replaygain" in desc.lower():
+                    to_delete.append(key)
+        for key in to_delete:
+            del audio[key]
+
+        audio.add(TXXX(encoding=3, desc="replaygain_track_gain", text=gain_text))
+        audio.add(TXXX(encoding=3, desc="replaygain_track_peak", text=peak_val))
+        audio.save()
+        return True
+    except Exception:
+        return False
+
+
 def apply_replaygain(filepath: str) -> bool:
     """
     Scan *filepath* with ffmpeg's ``replaygain`` filter and write
     ReplayGain 2.0 tags (``replaygain_track_gain``,
     ``replaygain_track_peak``) via mutagen.
 
+    Note: the caller is responsible for checking ``_has_replaygain``
+    beforehand if skipping already-tagged files is desired.
+
     Returns ``True`` on success, ``False`` on failure (non-fatal).
     """
-    # Skip if the file already has valid ReplayGain tags
-    if _has_replaygain(filepath):
-        return True  # already done — treat as success
     # ---- Step 1: ffmpeg scan ----
     cmd = [
         _FFMPEG_EXE,
@@ -636,26 +721,7 @@ def apply_replaygain(filepath: str) -> bool:
     gain_text = f"{gain_val} dB"
 
     # ---- Step 3: Write ID3 TXXX tags ----
-    try:
-        from mutagen.id3 import ID3, TXXX
-
-        audio = ID3(filepath)
-        # Remove any existing ReplayGain tags
-        to_delete = []
-        for key, frame in audio.items():
-            if key.startswith("TXXX"):
-                desc = getattr(frame, "desc", "")
-                if "replaygain" in desc.lower():
-                    to_delete.append(key)
-        for key in to_delete:
-            del audio[key]
-
-        audio.add(TXXX(encoding=3, desc="replaygain_track_gain", text=gain_text))
-        audio.add(TXXX(encoding=3, desc="replaygain_track_peak", text=peak_val))
-        audio.save()
-        return True
-    except Exception:
-        return False
+    return _write_replaygain_values(filepath, gain_text, peak_val)
 
 
 # ---------------------------------------------------------------------------
@@ -830,14 +896,20 @@ class PodcastEngine:
                     self._log(f"  → 播客: {podcast} | 标题: {title} | "
                               f"音轨号: {track_num}")
 
-                    # -- 3e. Format ID3 tags --
+                    # -- 3e. Save ReplayGain BEFORE formatting (formatting wipes all tags) --
+                    saved_rg = _read_replaygain_values(filepath)
+
+                    # -- 3f. Format ID3 tags --
                     format_id3_tags(filepath, podcast, title, track_num, podcast_dir)
                     self._log(f"  → 标签已格式化")
 
-                    # -- 3f. Apply ReplayGain --
-                    if _has_replaygain(filepath):
-                        rg_ok = True
-                        self._log(f"  → ReplayGain 已跳过 (已有增益信息)")
+                    # -- 3g. Apply / restore ReplayGain --
+                    if saved_rg is not None:
+                        # Restore saved values — no need to re-scan
+                        rg_ok = _write_replaygain_values(
+                            filepath, saved_rg[0], saved_rg[1]
+                        )
+                        self._log(f"  → ReplayGain 已保留 (无需重新扫描)")
                     else:
                         self._report(f"扫描增益 ({processed_count + 1}/{total})...",
                                      int(processed_count / max(total, 1) * 100))

@@ -34,13 +34,14 @@ PODCAST_NAMES = [
     "谐星聊天会",
     "正经叭叭",
     "科技参考5",
+    "贤鱼播客集",
 ]
 
 # Podcasts that extract track number from the filename
 TYPE_A_PODCASTS = {"得体广播站", "三个火呛手", "正经叭叭", "科技参考5"}
 
 # Podcasts that get track number from directory (max + 1)
-TYPE_B_PODCASTS = {"罗永浩的十字路口", "谐星聊天会"}
+TYPE_B_PODCASTS = {"罗永浩的十字路口", "谐星聊天会", "贤鱼播客集"}
 
 # Podcast with special title handling (preserve number prefix)
 XIE_XING = "谐星聊天会"
@@ -72,6 +73,7 @@ FILENAME_TO_PODCAST = [
     ("罗永浩的十字路口", "罗永浩的十字路口"),
     ("谐星聊天会", "谐星聊天会"),
     ("正经叭叭", "正经叭叭"),
+    ("漫喜利工作室", "贤鱼播客集"),
     ("科技参考", "科技参考5"),
     ("zk-", "科技参考5"),
     ("ZK-", "科技参考5"),
@@ -587,8 +589,14 @@ def _load_album_art(podcast_dir: str) -> bytes | None:
 
 
 # ---------------------------------------------------------------------------
-# ReplayGain via ffmpeg
+# ReplayGain via ffmpeg (EBU R128)
 # ---------------------------------------------------------------------------
+
+# Target loudness level in LUFS for ReplayGain calculation.
+# EBU R128 / ReplayGain 2.0 targets -18 LUFS, matching foobar2000's default.
+# Adjust this if you prefer a different reference level.
+_REPLAYGAIN_TARGET_LUFS = -18.0
+
 
 def _has_replaygain(filepath: str) -> bool:
     """
@@ -664,7 +672,8 @@ def _write_replaygain_values(filepath: str, gain_text: str, peak_val: str) -> bo
 
 def apply_replaygain(filepath: str) -> bool:
     """
-    Scan *filepath* with ffmpeg's ``replaygain`` filter and write
+    Scan *filepath* with ffmpeg's ``ebur128`` filter (EBU R128 standard,
+    the same loudness measurement used by foobar2000) and write
     ReplayGain 2.0 tags (``replaygain_track_gain``,
     ``replaygain_track_peak``) via mutagen.
 
@@ -673,17 +682,15 @@ def apply_replaygain(filepath: str) -> bool:
 
     Returns ``True`` on success, ``False`` on failure (non-fatal).
     """
-    # ---- Step 1: ffmpeg scan ----
+    # ---- Step 1: ffmpeg scan with EBU R128 ----
     cmd = [
         _FFMPEG_EXE,
         "-i", filepath,
-        "-af", "replaygain",
+        "-af", "ebur128=peak=true",
         "-f", "null",
         "-",
     ]
     try:
-        # Use bytes mode + manual decode to avoid GBK encoding errors on
-        # Chinese Windows — ffmpeg stderr mixes UTF-8 and raw binary.
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -705,22 +712,44 @@ def apply_replaygain(filepath: str) -> bool:
     if not stderr_output:
         return False
 
-    # ---- Step 2: Parse gain & peak ----
-    gain_match = re.search(
-        r"track_gain\s*=\s*([+-]?\d+\.?\d*)\s*dB", stderr_output
-    )
-    peak_match = re.search(
-        r"track_peak\s*=\s*([\d.]+)", stderr_output
-    )
-
-    if not gain_match or not peak_match:
+    # ---- Step 2: Parse integrated loudness & true peak ----
+    # The ebur128 filter outputs per-frame log lines that also contain
+    # "I:" / "Peak:" markers.  Only parse the final Summary section:
+    #   Summary:
+    #   Integrated loudness:
+    #   I:         -20.5 LUFS
+    #   ...
+    #   True peak:
+    #   Peak:       -1.2 dBFS
+    summary_idx = stderr_output.find("Summary:")
+    if summary_idx < 0:
         return False
 
-    gain_val = gain_match.group(1)
-    peak_val = peak_match.group(1)
-    gain_text = f"{gain_val} dB"
+    summary_text = stderr_output[summary_idx:]
 
-    # ---- Step 3: Write ID3 TXXX tags ----
+    il_match = re.search(
+        r"I:\s+(-?\d+\.?\d*)\s*LUFS", summary_text
+    )
+    peak_match = re.search(
+        r"Peak:\s+(-?\d+\.?\d*)\s*dBFS", summary_text
+    )
+
+    if not il_match or not peak_match:
+        return False
+
+    integrated_lufs = float(il_match.group(1))
+    peak_dbfs = float(peak_match.group(1))
+
+    # ---- Step 3: Compute gain to reach target LUFS ----
+    # Positive gain = boost, negative gain = cut
+    gain_db = _REPLAYGAIN_TARGET_LUFS - integrated_lufs
+    gain_text = f"{gain_db:.2f} dB"
+
+    # Convert peak from dBFS to linear (ReplayGain convention)
+    peak_linear = 10 ** (peak_dbfs / 20)
+    peak_val = f"{peak_linear:.6f}"
+
+    # ---- Step 4: Write ID3 TXXX tags ----
     return _write_replaygain_values(filepath, gain_text, peak_val)
 
 

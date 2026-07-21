@@ -80,21 +80,21 @@ FILENAME_TO_PODCAST = [
 ]
 
 # Regex for episode-number prefix in filenames
-# Matches: Vol.147, vol.86, Ep40., ep 12, #05, VOL 3 etc.
+# Matches: Vol.147, vol:150, Ep40., ep 12, #05, VOL 3 etc.
 _RE_EPISODE_PREFIX = re.compile(
-    r"^(?:Vol\.?|vol\.?|VOL\.?|Ep\.?|ep\.?|EP\.?|#)\s*(\d+)[\.\s]*(.*)",
+    r"^(?:Vol[.:]?|vol[.:]?|VOL[.:]?|Ep[.:]?|ep[.:]?|EP[.:]?|#)\s*(\d+)[\.\s:]*(.*)",
     re.DOTALL,
 )
 
-# Fallback for bare track numbers: "259 - vol.259标题", "001 标题", etc.
+# Fallback for bare track numbers: "259 - vol.259标题", "001: 标题", etc.
 _RE_BARE_TRACK = re.compile(
-    r"^(\d{1,4})[\.\s\-\|｜]+(.*)",
+    r"^(\d{1,4})[\.\s\-\|｜:]+(.*)",
     re.DOTALL,
 )
 
-# Specific regex for 谐星聊天会 to extract "vol.86" → "86. "
+# Specific regex for 谐星聊天会 to extract "vol.86" / "vol:86" → "86. "
 _RE_XIEXING_PREFIX = re.compile(
-    r"^(?:vol\.?|Vol\.?|VOL\.?)\s*(\d+)[\.\s]*(.*)",
+    r"^(?:vol[.:]?|Vol[.:]?|VOL[.:]?)\s*(\d+)[\.\s:]*(.*)",
     re.DOTALL,
 )
 
@@ -167,8 +167,8 @@ def detect_podcast(filepath: str) -> str | None:
 #   "Vol.147 标题"  → "标题"
 #   "ep 12 标题"    → "标题"
 _RE_TAG_TITLE_TRACK = re.compile(
-    r"^(?:(?:Vol\.?|vol\.?|VOL\.?|Ep\.?|ep\.?|EP\.?|#)\s*\d{1,4}[\.\s\-\|｜]*"
-    r"|\d{1,4}[\.\s\-\|｜]+)",
+    r"^(?:(?:Vol[.:]?|vol[.:]?|VOL[.:]?|Ep[.:]?|ep[.:]?|EP[.:]?|#)\s*\d{1,4}[\.\s\-\|｜:]*"
+    r"|\d{1,4}[\.\s\-\|｜:]+)",
 )
 
 
